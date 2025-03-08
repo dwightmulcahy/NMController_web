@@ -4,7 +4,7 @@ import time
 from enum import Enum
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 
 # Custom exceptions for thread-specific errors
@@ -48,44 +48,62 @@ class ManagedThread:
       self.thread.start()
       self._set_state(ThreadState.RUNNING)
 
+      logger.debug(f"[{self.get_thread_name()}] Init'd")
+
+   def _set_state(self, new_state):
+      with self._state_lock:
+         logger.debug(f"[{self.get_thread_name()}] Changing state from {self._state} to {new_state}")
+         self._state = new_state
+
+   def get_state(self):
+      with self._state_lock:
+         return self._state
+
    def _run_wrapper(self):
+      """Internal wrapper that assures that any uncaught exceptions don't bomb the world"""
       try:
          self.run()
       except Exception as e:
-         logging.error(f"[{self.get_thread_name()}] Thread encountered an error: {e}", exc_info=True)
+         logger.error(f"[{self.get_thread_name()}] Thread encountered an error: {e}", exc_info=True)
 
    def run(self):
+      """Subclasses MUST implement this, this is where all the thread action occurs"""
       raise NotImplementedError("Subclasses must implement the 'run' method.")
 
    def stop(self):
       """Gracefully stops the thread and ensures it exits properly."""
-      logging.info(f"[{self.get_thread_name()}] Shutting down thread...")
+      logger.debug(f"[{self.get_thread_name()}] Shutting down thread...")
       self._stop_event.set()
       self._pause_event.set()  # Ensure the thread isn't paused while stopping
 
       # Only join if the thread is actually alive
       if self.thread and self.thread.is_alive():
-         self.thread.join(timeout=5)  # Wait for the thread to finish (max 5 sec)
-         if self.thread.is_alive():
-            logging.warning(f"[{self.get_thread_name()}] Thread did not stop within timeout.")
+         self.thread.join(timeout=self.update_seconds)  # Wait for the thread to finish (last update)
 
-      self._state = ThreadState.STOPPED
+         # Give the thread a 1/2 sec to update
+         time.sleep(0.5)
+
+         # Thread is alive if the timeout happened
+         if self.thread.is_alive():
+            logger.warning(f"[{self.get_thread_name()}] Thread did not stop within timeout.")
+
+      self._set_state(ThreadState.STOPPED)
 
    def pause(self):
-      logging.info(f"[{self.get_thread_name()}] Pausing thread...")
+      logger.debug(f"[{self.get_thread_name()}] Pausing thread...")
       self._pause_event.clear()
       self._set_state(ThreadState.PAUSED)
 
    def resume(self):
-      logging.info(f"[{self.get_thread_name()}] Resuming thread...")
+      logger.debug(f"[{self.get_thread_name()}] Resuming thread...")
       self._pause_event.set()
       self._set_state(ThreadState.RUNNING)
 
    def restart(self):
-      logging.info(f"[{self.get_thread_name()}] Restarting thread...")
+      logger.debug(f"[{self.get_thread_name()}] Restarting thread...")
       # Ensure stop() only joins if the thread has been started
       if self.thread.is_alive():
-         logging.warning(f"[{self.get_thread_name()}] Old thread is still running. Waiting before restart.")
+         logger.warning(f"[{self.get_thread_name()}] Old thread is still running. Waiting before restart.")
          self.stop()
       self._stop_event.clear()
       self._set_state(ThreadState.RESTARTING)
@@ -119,15 +137,6 @@ class ManagedThread:
             return
          except (UpdateFailedError, OperationFailedError) as e:
             attempt += 1
-            logging.error(f"[{self.get_thread_name()}] Error during operation: {e}. Retrying... ({attempt}/{retries})")
+            logger.error(f"[{self.get_thread_name()}] Error during operation: {e}. Retrying... ({attempt}/{retries})")
             time.sleep(timeout)
       raise ThreadError(f"Operation failed after {retries} retries.")
-
-   def _set_state(self, new_state):
-      with self._state_lock:
-         logging.debug(f"[{self.get_thread_name()}] Changing state from {self._state} to {new_state}")
-         self._state = new_state
-
-   def get_state(self):
-      with self._state_lock:
-         return self._state
